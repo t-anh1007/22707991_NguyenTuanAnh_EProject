@@ -1,56 +1,82 @@
-name: CI
-on: [push, pull_request]
+name: CI/CD
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
-  test:
+  build-test:
     runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:6
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Create .env files
+      - name: Use Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install dependencies for all services
         run: |
-          echo "MONGODB_AUTH_URI=${{ secrets.MONGODB_AUTH_URI }}" > auth/.env
-          echo "JWT_SECRET=${{ secrets.JWT_SECRET }}" >> auth/.env
-          echo "JWT_SECRET=${{ secrets.JWT_SECRET }}" > product/.env
-          echo "MONGODB_PRODUCT_URI=${{ secrets.MONGODB_PRODUCT_URI }}" >> product/.env
-          echo "LOGIN_TEST_USER=${{ secrets.LOGIN_TEST_USER }}" >> product/.env
-          echo "LOGIN_TEST_PASSWORD=${{ secrets.LOGIN_TEST_PASSWORD }}" >> product/.env
+          set -e
+          for d in api-gateway auth product order; do
+            if [ -f "$d/package.json" ]; then
+              echo "Installing deps for $d"
+              (cd $d && npm ci || npm install)
+            fi
+          done
 
-      - name: Validate Mongo connection strings
+      - name: Run tests for services that have tests
+        env:
+          MONGODB_AUTH_URI: mongodb://127.0.0.1:27017/auth_db
+          NODE_ENV: test
+          JWT_SECRET: test_secret
         run: |
-          set -a
-          source auth/.env || true
-          source product/.env || true
-          set +a
-          if [[ -z "${MONGODB_AUTH_URI:-}" || ! "${MONGODB_AUTH_URI}" =~ ^mongodb(\+srv)?:\/\/ ]]; then
-            echo "ERROR: MONGODB_AUTH_URI is missing or invalid"
-            exit 1
-          fi
-          if [[ -z "${MONGODB_PRODUCT_URI:-}" || ! "${MONGODB_PRODUCT_URI}" =~ ^mongodb(\+srv)?:\/\/ ]]; then
-            echo "ERROR: MONGODB_PRODUCT_URI is missing or invalid"
-            exit 1
-          fi
+          set -e
+          for d in auth product; do
+            if [ -f "$d/package.json" ]; then
+              echo "Running tests for $d"
+              (cd $d && npm test --silent)
+            fi
+          done
 
-      - name: Install dependencies (auth)
-        working-directory: ./auth
-        run: npm ci
+  build-and-push:
+    needs: build-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
 
-      - name: Install dependencies (product)
-        working-directory: ./product
-        run: npm ci
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: Install root deps
-        run: npm ci
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Run tests for auth
-        working-directory: ./auth
+      - name: Build and push Docker images
         run: |
-          npm test
-
-      - name: Run tests for product (start auth in background)
-        run: |
-          cd auth && npm start &   # start auth service
-          sleep 6                  # wait for auth to be ready
-          cd ../product
-          npm test
+          set -e
+          for d in api-gateway auth product order; do
+            if [ -f "$d/Dockerfile" ]; then
+              IMAGE_NAME=${{ secrets.DOCKERHUB_USERNAME }}/$d:${{ github.sha }}
+              echo "Building and pushing $IMAGE_NAME"
+              docker build -t $IMAGE_NAME $d
+              docker push $IMAGE_NAME
+            fi
+          done
