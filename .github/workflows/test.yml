@@ -17,6 +17,21 @@ jobs:
           echo "LOGIN_TEST_USER=${{ secrets.LOGIN_TEST_USER }}" >> product/.env
           echo "LOGIN_TEST_PASSWORD=${{ secrets.LOGIN_TEST_PASSWORD }}" >> product/.env
 
+      - name: Validate Mongo connection strings
+        run: |
+          set -a
+          source auth/.env || true
+          source product/.env || true
+          set +a
+          if [[ -z "${MONGODB_AUTH_URI:-}" || ! "${MONGODB_AUTH_URI}" =~ ^mongodb(\+srv)?:\/\/ ]]; then
+            echo "ERROR: MONGODB_AUTH_URI is missing or invalid"
+            exit 1
+          fi
+          if [[ -z "${MONGODB_PRODUCT_URI:-}" || ! "${MONGODB_PRODUCT_URI}" =~ ^mongodb(\+srv)?:\/\/ ]]; then
+            echo "ERROR: MONGODB_PRODUCT_URI is missing or invalid"
+            exit 1
+          fi
+
       - name: Install dependencies (auth)
         working-directory: ./auth
         run: npm ci
@@ -35,7 +50,7 @@ jobs:
 
       - name: Run tests for product (start auth in background)
         run: |
-          cd auth && npm start &   # start auth service in background
-          sleep 5                  # wait for auth to be ready
+          cd auth && npm start &   # start auth service
+          sleep 6                  # wait for auth to be ready
           cd ../product
           npm test
