@@ -1,82 +1,154 @@
-name: CI/CD
+name: CI-CD
 
 on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
 
 jobs:
-  build-test:
+  test:
+    name: Unit and integration tests
     runs-on: ubuntu-latest
+    # Run steps inside a container so we can resolve service hostnames (mongo, rabbitmq)
+    container: node:18
 
     services:
-      mongodb:
+      mongo:
         image: mongo:6
         ports:
           - 27017:27017
         options: >-
-          --health-cmd "mongosh --eval 'db.runCommand({ ping: 1 })'"
+          --health-cmd "mongosh --eval 'db.adminCommand({ ping: 1 })' || exit 1"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Use Node.js 18
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
-
-      - name: Install dependencies for all services
-        run: |
-          set -e
-          for d in api-gateway auth product order; do
-            if [ -f "$d/package.json" ]; then
-              echo "Installing deps for $d"
-              (cd $d && npm ci || npm install)
-            fi
-          done
-
-      - name: Run tests for services that have tests
+      rabbitmq:
+        image: rabbitmq:3-management
         env:
-          MONGODB_AUTH_URI: mongodb://127.0.0.1:27017/auth_db
-          NODE_ENV: test
-          JWT_SECRET: test_secret
-        run: |
-          set -e
-          for d in auth product; do
-            if [ -f "$d/package.json" ]; then
-              echo "Running tests for $d"
-              (cd $d && npm test --silent)
-            fi
-          done
-
-  build-and-push:
-    needs: build-test
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+          RABBITMQ_DEFAULT_USER: admin
+          RABBITMQ_DEFAULT_PASS: 123456
+        ports:
+          - 5672:5672
+          - 15672:15672
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v2
+      - name: Show Node version
+        run: node -v
+
+      - name: Create env files for services
+        run: |
+          mkdir -p auth product
+          # Auth service
+          echo "MONGODB_AUTH_URI=mongodb://mongo:27017/eproject_auth_test" > auth/.env
+          echo "JWT_SECRET=secret" >> auth/.env
+          # Product service
+          echo "MONGODB_PRODUCT_URI=mongodb://mongo:27017/eproject_product_test" > product/.env
+          echo "JWT_SECRET=secret" >> product/.env
+          echo "RABBITMQ_URI=amqp://admin:123456@rabbitmq:5672" >> product/.env
+          echo "RABBITMQ_USER=admin" >> product/.env
+          echo "RABBITMQ_PASS=123456" >> product/.env
+          # Test login credentials (used by product tests to call auth service)
+          echo "LOGIN_TEST_USER=testuser" >> product/.env
+          echo "LOGIN_TEST_PASSWORD=password" >> product/.env
+
+      - name: Install dependencies (auth)
+        working-directory: auth
+        run: npm ci
+
+      - name: Install dependencies (product)
+        working-directory: product
+        run: npm ci
+
+      - name: Run tests (auth)
+        working-directory: auth
+        env:
+          MONGODB_AUTH_URI: mongodb://mongo:27017/eproject_auth_test
+          JWT_SECRET: secret
+        run: npm test
+
+      - name: Start auth service (background)
+        working-directory: auth
+        env:
+          MONGODB_AUTH_URI: mongodb://mongo:27017/eproject_auth_test
+          JWT_SECRET: secret
+        run: |
+          node index.js &
+          sleep 6
+
+      - name: Run tests (product)
+        working-directory: product
+        env:
+          MONGODB_PRODUCT_URI: mongodb://mongo:27017/eproject_product_test
+          JWT_SECRET: secret
+          RABBITMQ_URI: amqp://admin:123456@rabbitmq:5672
+          RABBITMQ_USER: admin
+          RABBITMQ_PASS: 123456
+          LOGIN_TEST_USER: testuser
+          LOGIN_TEST_PASSWORD: password
+        run: npm test
+
+  docker:
+    name: Build and push images
+    needs: test
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      secrets.DOCKERHUB_USERNAME && secrets.DOCKERHUB_TOKEN && secrets.DOCKERHUB_NAMESPACE
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push Docker images
-        run: |
-          set -e
-          for d in api-gateway auth product order; do
-            if [ -f "$d/Dockerfile" ]; then
-              IMAGE_NAME=${{ secrets.DOCKERHUB_USERNAME }}/$d:${{ github.sha }}
-              echo "Building and pushing $IMAGE_NAME"
-              docker build -t $IMAGE_NAME $d
-              docker push $IMAGE_NAME
-            fi
-          done
+      - name: Build and push auth image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./auth
+          file: ./auth/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_NAMESPACE }}/eproject-auth:latest
+            ${{ secrets.DOCKERHUB_NAMESPACE }}/eproject-auth:${{ github.sha }}
+
+      - name: Build and push product image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./product
+          file: ./product/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_NAMESPACE }}/eproject-product:latest
+            ${{ secrets.DOCKERHUB_NAMESPACE }}/eproject-product:${{ github.sha }}
+
+      - name: Build and push order image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./order
+          file: ./order/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_NAMESPACE }}/eproject-order:latest
+            ${{ secrets.DOCKERHUB_NAMESPACE }}/eproject-order:${{ github.sha }}
+
+      - name: Build and push api-gateway image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./api-gateway
+          file: ./api-gateway/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_NAMESPACE }}/eproject-apigateway:latest
+            ${{ secrets.DOCKERHUB_NAMESPACE }}/eproject-apigateway:${{ github.sha }}
