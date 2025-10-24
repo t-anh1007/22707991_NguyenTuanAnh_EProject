@@ -170,9 +170,29 @@ Authorization: Bearer {{auth_token}}
 ]
 ```
 
-#### 3.3 Tạo đơn hàng
+#### 3.3 Lấy sản phẩm theo ID
 ```
-POST {{base_url}}/products/order
+GET {{base_url}}/products/:id
+Authorization: Bearer {{auth_token}}
+```
+
+**Expected Response:**
+```json
+{
+  "_id": "68f9ea19795dc37e68e039ff",
+  "name": "iPhone 15",
+  "price": 39900000,
+  "description": "Latest iPhone model",
+  "category": "Electronics",
+  "stock": 50,
+  "createdAt": "2025-10-18T10:30:00.000Z",
+  "updatedAt": "2025-10-18T10:30:00.000Z"
+}
+```
+
+#### 3.4 Tạo đơn hàng
+```
+POST {{base_url}}/products/buy
 Authorization: Bearer {{auth_token}}
 Content-Type: application/json
 
@@ -193,7 +213,7 @@ Content-Type: application/json
 }
 ```
 
-#### 3.4 Kiểm tra trạng thái đơn hàng
+#### 3.5 Kiểm tra trạng thái đơn hàng
 ```
 GET {{base_url}}/products/order/:orderId
 Authorization: Bearer {{auth_token}}
@@ -217,10 +237,14 @@ Authorization: Bearer {{auth_token}}
 ![Get Products API Test](./public/results/getProduct.png)
 *Test API lấy danh sách tất cả sản phẩm*
 
-### 5. Tạo đơn hàng (Create Order)
+### 5. Lấy sản phẩm theo ID (Get Product by ID)
+![Get Product by ID API Test](./public/results/getProductbyID.png)
+*Test API lấy thông tin chi tiết sản phẩm theo ID*
+
+### 6. Tạo đơn hàng (Create Order)
 ![Create Order API Test](./public/results/orderProduct.png)
 *Test API tạo đơn hàng với sản phẩm đã chọn*
 
-### 6. RabbitMQ Management Interface
+### 7. RabbitMQ Management Interface
 ![RabbitMQ Dashboard](./public/results/rabbit.png)
 *Giao diện quản lý RabbitMQ hiển thị message queues*
